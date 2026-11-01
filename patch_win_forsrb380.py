@@ -1,18 +1,23 @@
 #!/usr/bin/env python3
 # patch_win.py v2 —— Windows pin patch（ReadProcessMemory + 启发式发现 + 崩溃自动重启）
 #
-#  用法: python patch_win.py <SRBMiner.exe> [矿工参数透传...] [--auto-restart] [--no-discover]
+#  用法: python patch_win.py <SRBMiner.exe> [矿工参数透传...] [--guarded-discover] [--no-discover] [--auto-restart]
 #
 #  开关:
+#    --guarded-discover 显式开启 guarded 发现（默认已是该模式，仅为可读性保留）
+#    --no-discover    关闭启发式 pin 发现
 #    --auto-restart   矿工崩溃/退出后自动重启（间隔 8 秒）
-#    --no-discover    关闭启发式 pin 发现（默认开启）
 #
 #  启发式发现（对付新 devpool，不用改脚本）:
 #    ① 锚点扩展：在「已知 pin」出现的位置 ±1KB 范围内，找新的 32 字节高熵块
 #       （pin 都存在同一类结构里，新 devpool 的 pin 大概率就在老 pin 旁边）
 #    ② IP 锚定：在内存里搜新 devpool 的 IP 字符串，附近找 32 字节高熵块
-#    出现 ≥3 次的候选自动加入替换列表
-import subprocess, time, sys, os, socket, ssl, ctypes, signal
+#
+#  guarded 试写（默认，替代旧版盲写）:
+#    候选逐个写入 → 观察 120 秒：矿工崩溃 → 拉黑（持久化到 pins_state.json），
+#    重启后测下一个候选；存活 → 保留为新 pin（同样持久化）。
+#    旧版"出现≥3次直接加入"在 3.8 上盲写了毒数据导致 0xC0000374 崩溃，已废弃。
+import subprocess, time, sys, os, json, socket, ssl, ctypes, signal
 import ctypes.wintypes as wt
 from collections import Counter
 
@@ -26,6 +31,32 @@ REAL_PINS = [
     bytes.fromhex("b9bc7fe6e7a89774f63bc6322c6ce8a89e562e6721baa704962f293cc592562a"),
     bytes.fromhex("52dc6759812d4c8156aef4dc158576d82046e7713a413797f40d7a40ad9c3c3e"),
 ]
+
+# 实测写必崩的毒数据（0xC0000374）：看起来像 pin（高熵、出现在端点表附近）但不是 pin 槽位。
+# 预置进黑名单，guarded 试写永远不会碰它们。
+KNOWN_POISON = [
+    "00904324407fa1fd6fd8e5d277621d383326d9769cfe01a88059f9e25119eae1",
+    "36322e35333a3132303000128a96d4cbfbdf5acaa1f7d503963898dff177c602",  # ASCII "62.53:1200\0" 碎片
+]
+
+SOAK_SECONDS = 120  # 每个候选的观察期
+
+STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pins_state.json")
+
+def load_state():
+    """pins_state.json: {"blacklist": [...], "accepted": [...]}（均为 hex 字符串）"""
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            s = json.load(f)
+        return set(s.get("blacklist", [])), list(s.get("accepted", []))
+    except Exception:
+        return set(), []
+
+def save_state(blacklist, accepted):
+    tmp = STATE_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"blacklist": sorted(blacklist), "accepted": list(accepted)}, f, indent=1)
+    os.replace(tmp, STATE_FILE)
 
 # 新 devpool 线索（直连取不到证书时，用 IP 锚定法在内存里找它的 pin）
 DEVPOOL_HINTS = [
@@ -73,14 +104,26 @@ def iter_regions(h):
             yield base, bytes(buf[:rb.value])
 
 def is_hash_like(blk):
-    return len(set(blk)) >= 28
+    if len(set(blk)) < 28: return False
+    # 拒绝含长 ASCII 串的块（如 IP:port 字符串碎片 "62.53:1200\0"），替换这类块会写坏堆。
+    # 阈值取 8：随机 32 字节出现 ≥8 连续可打印字符的概率 <1%，误杀真 pin 风险很小
+    run = 0
+    for b in blk:
+        if 32 <= b < 127:
+            run += 1
+            if run >= 8: return False
+        else:
+            run = 0
+    return True
 
 def is_shifted_copy(blk, known_pins):
-    """blk 是否是某个已知 pin 的错位副本（滑动窗口产生的假 pin）"""
+    """blk 是否与某个已知 32 字节块重叠（滑动窗口产生的错位副本）。
+    只要有一个字节重叠就拒绝：写这种窗口会波及相邻关键字段（如端点表毒数据的
+    头字节），实测会触发 0xC0000374 崩溃；且这类块本身也不是 pin。"""
     for pin in known_pins:
-        for sh in range(1, 17):
-            if blk[sh:] == pin[:32 - sh]: return True   # blk = pin 右移
-            if blk[:32 - sh] == pin[sh:]: return True   # pin = blk 右移
+        for sh in range(1, 32):
+            if blk[sh:] == pin[:32 - sh]: return True   # blk 覆盖 pin 头部
+            if blk[:32 - sh] == pin[sh:]: return True   # blk 覆盖 pin 尾部
     return False
 
 def scan_and_patch(h, mine_sha, pins, discover=None):
@@ -105,7 +148,7 @@ def scan_and_patch(h, mine_sha, pins, discover=None):
                     w = data[lo:hi]
                     for off in range(0, len(w) - 32):
                         blk = w[off:off + 32]
-                        if blk != mine_sha and blk not in pins and is_hash_like(blk)                            and not is_shifted_copy(blk, pins):
+                        if blk != mine_sha and blk not in pins and is_hash_like(blk)                            and not is_shifted_copy(blk, pins + [mine_sha]):
                             discover[blk] += 1
                     idx = data.find(pin, idx + 32)
             # ② IP 锚定：devpool IP 字符串 ±1KB 找 32B 高熵块
@@ -117,7 +160,7 @@ def scan_and_patch(h, mine_sha, pins, discover=None):
                     w = data[lo:hi]
                     for off in range(0, len(w) - 32):
                         blk = w[off:off + 32]
-                        if blk != mine_sha and blk not in pins and is_hash_like(blk)                            and not is_shifted_copy(blk, pins):
+                        if blk != mine_sha and blk not in pins and is_hash_like(blk)                            and not is_shifted_copy(blk, pins + [mine_sha]):
                             discover[blk] += 1
                     idx = data.find(ipb, idx + len(ipb))
     return n
@@ -154,7 +197,7 @@ def main():
     argv = sys.argv[1:]
     auto_restart = "--auto-restart" in argv or "--restart" in argv
     no_discover = "--no-discover" in argv
-    argv = [a for a in argv if a not in ("--auto-restart", "--restart", "--no-discover")]
+    argv = [a for a in argv if a not in ("--auto-restart", "--restart", "--no-discover", "--guarded-discover")]
 
     if not argv:
         print("用法: python patch_win.py <SRBMiner.exe> [矿工参数...] [--auto-restart] [--no-discover]")
@@ -163,7 +206,7 @@ def main():
     if not os.path.isfile(exe): print("[X] 找不到:", exe); return 1
 
     print("=" * 60)
-    print("patch_win v2 (ReadProcessMemory + 启发式%s)" % ("" if not no_discover else "[关]"))
+    print("patch_win v2 (ReadProcessMemory + 启发式%s)" % ("[关]" if no_discover else "[guarded试写]"))
     print("=" * 60)
     proxy = parse_proxy(miner_args)
     if not proxy: print("[X] 缺 --proxy"); return 1
@@ -174,8 +217,17 @@ def main():
     except Exception as e:
         print("[X] 探测代理失败:", e); return 1
 
+    blacklist, accepted = load_state()
+    blacklist |= set(KNOWN_POISON)
     pins = list(REAL_PINS)
-    print("  初始 pin: %d 个 / IP 锚点: %d 个" % (len(pins), len(DEVPOOL_HINTS)))
+    for hx in accepted:
+        b = bytes.fromhex(hx)
+        if b not in pins:
+            pins.append(b)
+    if not os.path.isfile(STATE_FILE):
+        save_state(blacklist, accepted)
+    print("  初始 pin: %d 个（含持久化新 pin %d 个）/ 黑名单 %d 个 / IP 锚点: %d 个"
+          % (len(pins), len(accepted), len(blacklist), len(DEVPOOL_HINTS)))
     print("  auto-restart: %s\n" % ("开" if auto_restart else "关"))
 
     logf = open(os.path.join(os.path.dirname(os.path.abspath(exe)), "run_out.log"), "ab")
@@ -208,18 +260,41 @@ def main():
         if n:
             print("[%0.1fs] 替换 %d 处（累计 %d）" % (time.time() - t0, n, total), flush=True)
 
-        # 启发式：出现 >=3 次的新 pin 自动加入
+        # guarded 试写：候选逐个写入观察，崩→拉黑，活→保留（替代旧版盲写）
         if cands:
-            for blk, cnt in cands.most_common(10):
-                if cnt >= 3 and blk not in pins and not is_shifted_copy(blk, pins):
-                    pins.append(blk)
-                    print("  ★ 启发式发现新 pin: %s（%d 次）→ 已加入替换列表" % (blk.hex(), cnt), flush=True)
-            if len(pins) > len(REAL_PINS):
-                # 立刻用新 pin 补一轮
-                n2 = scan_and_patch(h, mine_sha, pins)
-                total += n2
-                if n2:
-                    print("  ★ 新 pin 补替换 %d 处（累计 %d）" % (n2, total), flush=True)
+            overlap_refs = pins + [mine_sha] + [bytes.fromhex(h) for h in blacklist if len(h) == 64]
+            for blk, cnt in cands.most_common(8):
+                hx = blk.hex()
+                if cnt < 3 or blk in pins:
+                    continue
+                if hx in blacklist:
+                    print("  · 跳过黑名单候选 %s" % hx, flush=True)
+                    continue
+                if is_shifted_copy(blk, overlap_refs):
+                    print("  · 跳过与已知块重叠的候选 %s" % hx, flush=True)
+                    continue
+                print("  ◆ 试写候选 %s（计数 %d）→ 观察 %d 秒..." % (hx, cnt, SOAK_SECONDS), flush=True)
+                nw = scan_and_patch(h, mine_sha, pins + [blk])
+                print("    写入 %d 处" % nw, flush=True)
+                dead = False
+                t_end = time.time() + SOAK_SECONDS
+                while time.time() < t_end:
+                    if p.poll() is not None:
+                        dead = True
+                        break
+                    scan_and_patch(h, mine_sha, pins + [blk])
+                    time.sleep(0.3)
+                if dead:
+                    print("    ✗ 矿工崩溃 → 拉黑 %s（重启后测下一个候选）" % hx, flush=True)
+                    if not auto_restart:
+                        print("    （未开 --auto-restart：重新运行本脚本将继续测试剩余候选）")
+                    blacklist.add(hx)
+                    save_state(blacklist, accepted)
+                    break
+                print("    ✓ 观察期通过 → 保留为新 pin", flush=True)
+                pins.append(blk)
+                accepted.append(hx)
+                save_state(blacklist, accepted)
 
         # 后续循环：持续 patch（矿工可能重新解密 pin）
         while True:
