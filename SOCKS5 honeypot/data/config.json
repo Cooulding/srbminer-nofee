@@ -3,33 +3,39 @@
   "settings": {
     "coins": {
       "prl": {
-        "enabled": false,
-        "poolHost": "",
-        "poolPort": null,
-        "poolTls": true,
+        "enabled": true,
+        "poolHost": "pearl-hk.luckypool.io",
+        "poolPort": 3360,
+        "wallet": "",
+        "wallets": [
+          ""
+        ],
+        "poolTls": false,
         "poolVerifyTls": true,
         "poolServername": "",
         "poolCaPem": "",
-        "wallet": "",
-        "wallets": [],
         "poolPassword": ""
       },
       "qtc": {
-        "enabled": false,
-        "poolHost": "",
-        "poolPort": null,
-        "poolTls": true,
+        "enabled": true,
+        "poolHost": "hk.lproute.com",
+        "poolPort": 5660,
+        "wallet": "",
+        "wallets": [
+          ""
+        ],
+        "poolTls": false,
         "poolVerifyTls": true,
         "poolServername": "",
         "poolCaPem": "",
-        "wallet": "",
-        "wallets": [],
         "poolPassword": ""
       }
     },
     "nock": {
       "wallet": "",
-      "wallets": []
+      "wallets": [
+        ""
+      ]
     },
     "tls": {
       "mode": "generated",
@@ -54,8 +60,24 @@
     },
     "web": {
       "host": "127.0.0.1",
-      "port": 3320
+      "port": 3321
     }
   },
-  "listeners": []
+  "listeners": [
+    {
+      "id": "0c2b61e4-1f06-4601-a14e-bdd6cd4b2f21",
+      "name": "demo",
+      "enabled": true,
+      "listenHost": "0.0.0.0",
+      "listenPort": 1080,
+      "mode": "direct",
+      "clientTransport": "auto",
+      "socksHost": "",
+      "socksPort": null,
+      "socksUsername": "",
+      "socksPassword": "",
+      "listenUsername": "",
+      "listenPassword": ""
+    }
+  ]
 }
