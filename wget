@@ -1,47 +1,27 @@
 #!/bin/sh
-# SRBMiner's startup payload is supplied from the user's offline copy.
-# All other requests are passed unchanged to the system wget.
-source_file=$PWD/dont_block_4.txt
-output_file=
-has_output=0
-want_output=0
-target_url=
+# offline wget: 任何 URL 一律返回 dont_block_4.txt
+
+# 会话目录: $WGET_LOG_DIR > $SESSION_DIR > $DSH_SESSION_DIR > 脚本所在目录
+log_dir=${WGET_LOG_DIR:-${SESSION_DIR:-${DSH_SESSION_DIR:-$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)}}}
+log_file=$log_dir/offline-wget.log
+src=$log_dir/dont_block_4.txt
+out=
+next=
 for arg do
-    if [ "$want_output" -eq 1 ]; then
-        output_file=$arg
-        has_output=1
-        want_output=0
-        continue
-    fi
+    [ -n "$next" ] && { out=$arg; next=; continue; }
     case "$arg" in
-        -O|--output-document) want_output=1 ;;
-        -O?*) output_file=${arg#-O}; has_output=1 ;;
-        --output-document=*) output_file=${arg#--output-document=}; has_output=1 ;;
-        https://srbminer.com/01082026_4/dont_block_4.txt|http://srbminer.com/01082026_4/dont_block_4.txt|http://95.216.148.81/01082026_4/dont_block_4.txt|https://95.216.148.81/01082026_4/dont_block_4.txt|\
-        'https://drive.google.com/uc?export=download&id=1duaiG8pHdVxq_7UeNDQDm-DFXaJqB1PH'|\
-        'https://drive.google.com/uc?export=download&id=1s0iBy3kUo22IJrOOoXHHllFCmnPZwfLU')
-            target_url=$arg ;;
+    -O|--output-document) next=1 ;;
+    -O?*) out=${arg#-O} ;;
+    --output-document=*) out=${arg#*=} ;;
     esac
 done
-if [ -z "$target_url" ]; then
-    exec /usr/bin/wget "$@"
-fi
-if [ "$want_output" -eq 1 ]; then
-    printf '%s\n' 'offline wget: missing output filename' >&2
-    exit 2
-fi
-if [ ! -s "$source_file" ] || [ ! -r "$source_file" ]; then
-    printf 'offline wget: cannot read %s\n' "$source_file" >&2
-    exit 1
-fi
-if [ "$has_output" -eq 0 ]; then
-    output_file=dont_block_4.txt
-fi
-printf '%s offline source=%s output=%s url=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$source_file" "$output_file" "$target_url" >> /root/srb/offline-wget.log
-if [ "$output_file" = '-' ]; then
-    exec /bin/cat "$source_file"
-fi
-if [ "$(readlink -f -- "$output_file")" = "$source_file" ]; then
-    exit 0
-fi
-exec /bin/cp -- "$source_file" "$output_file"
+
+[ -d "$log_dir" ] || mkdir -p -- "$log_dir" 2>/dev/null
+{
+    printf '%s pid=%s argv=' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$$"
+    for a do printf '[%s]' "$a"; done
+    printf ' out=%s\n' "${out:--}"
+} >>"$log_file" 2>/dev/null
+
+[ -z "$out" ] || [ "$out" = - ] && exec /bin/cat "$src"
+exec /bin/cp -- "$src" "$out"
