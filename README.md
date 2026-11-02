@@ -160,10 +160,10 @@ Remove-NetFirewallRule -DisplayName "Block TCP Outbound devpool Ports"
 
 运行蜜罐服务器:
 
-下载 `miner-socks-gateway-clean.zip`并解压,下载`default_config.json`改名为`config.json`移动到`miner-socks-gateway-clean/data`
+下载`srbminer-nofee/default_config.json`改名为`config.json`移动到`srbminer-nofee/SOCKS5 honeypot/data/config.json`
 
 ```shell
-cd miner-socks-gateway-clean
+cd srbminer-nofee\SOCKS5 honeypot
 npm i
 npm start
 ```
