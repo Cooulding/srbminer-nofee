@@ -2,75 +2,95 @@
 
 ## Core Principle
 
-Use Frida to modify the runtime behavior of the miner core so that it trusts any certificate when connecting to DevPool; then use a SOCKS5 proxy to implement DevPool redirection and wallet address replacement testing.
+Modify the miner's runtime behavior so that it trusts any certificate when connecting to DevPool, then use a SOCKS5 proxy to redirect DevPool traffic and replace the wallet address.
 
 ## Deployment Notes
 
-It is recommended to prepare at least two machines to increase the success rate.  
-Deploy a SOCKS5 honeypot server on another machine in the internal network, to handle DevPool traffic redirection and wallet field replacement.
+It is recommended to prepare at least two machines to improve the success rate.
+
+Deploy a SOCKS5 honeypot server on another machine inside the internal network, so that it can handle DevPool traffic redirection and wallet field replacement.
 
 ## Network Architecture
 
 ```text
-Upstream Mining Pool
-▲
-│
-SOCKS5 honeypot server
-(DevPool redirection / wallet replacement)
-▲
-│
-┌───────┼───────┐
-│       │       │
-Rig 1    Rig 2    Rig 3 ...
+              Upstream pool
+                  ▲
+                  │
+          SOCKS5 honeypot server
+     (DevPool redirect / wallet replacement)
+                  ▲
+                  │
+          ┌───────┼───────┐
+          │       │       │
+       Miner1  Miner2  Miner3 ...
 ```
 
-All mining rigs must specify the actual IP and port of the SOCKS5 server via `--proxy`.
-
+Every miner must specify the actual IP address and port of the SOCKS5 server through `--proxy`.
 
 ## Usage
 
 ```bash
 # for Windows
-python patch_win.py <SRBMiner-MULTI.exe path> --proxy 192.168.1.2:1080 --pool xxx --wallet xxx
+python patch_win.py <path to SRBMiner-MULTI.exe> --proxy 192.168.1.2:1080 --pool xxx --wallet xxx
+
+#python patch_win.py "C:\Users\Administrator\Downloads\SRBMiner-Multi-3-7-5\SRBMiner-MULTI.exe" --disable-cpu --algorithm quantus --pool hk.lproute.com:5660 --wallet ??.?? --proxy 192.168.1.2:1080 --api-enable
+
 # for Linux
-# The Linux version of the miner calls wget to download a file; to prevent the file from changing or causing extra network usage, wrap a wget that returns the local dont_block_4.txt
+
+sudo iptables -A OUTPUT -p tcp -m multiport --dports 8049,8048,3360,5660,1200,18005 -j DROP
+
+# The Linux version of the miner calls wget to download a file. To keep this file from changing or from generating extra network traffic, wrap a wget that returns the local dont_block_4.txt
 chmod +x wget
 export PATH="$PWD:$PATH"
-python patch_linux.py <SRBMiner-MULTI.exe path> --proxy 192.168.1.2:1080 --pool xxx --wallet xxx
+
+python patch_linux.py <path to SRBMiner-MULTI.exe> --proxy 192.168.1.2:1080 --pool xxx --wallet xxx
+
+#python3 /root/patch_linux.py /root/SRBMiner-Multi-3-7-5/SRBMiner-MULTI -disable-cpu --algorithm quantus --pool hk.lproute.com:5660 --wallet ??.?? --proxy 192.168.1.2:1080 --api-enable
 ```
 
-Replace 192.168.1.2:1080 with the SOCKS5 honeypot server you deployed; using port 1080 is recommended.  
-**Note:** If the miner core cannot connect to DevPool through SOCKS5, it may attempt to bypass the proxy and connect to DevPool directly, causing the redirection and wallet replacement test to fail.  
-Therefore, you can restrict direct connections on specified ports via a firewall on the mining rigs. To be absolutely safe, simply block connections to all ports 1000-10000.  
-**Run the following on the mining rigs (not on the SOCKS5 server):**  
-For Windows:
+Change `192.168.1.2:1080` to the SOCKS5 honeypot server you deployed. Port 1080 is recommended.
+
+**Note:** If the kernel cannot reach DevPool through the SOCKS5 proxy, it may try to bypass the proxy and connect to DevPool directly, which would break the redirection and wallet replacement test.
+
+Therefore, you can block direct connections on the specified ports with a firewall on the miner itself, to be absolutely sure.
+
+**Execute on the miner (not on the SOCKS5 server):**
+
+For Windows (persistent):
 
 ```powershell
-New-NetFirewallRule -DisplayName "Block-Out-1000-10000" `
--Direction Outbound -Protocol TCP -RemotePort 1000-1079,1081-10000 -Action Block
+New-NetFirewallRule `
+  -DisplayName "Block TCP Outbound devpool Ports" `
+  -Direction Outbound `
+  -Action Block `
+  -Protocol TCP `
+  -RemotePort 1200,8049,8048,3360,5660,18005 `
+  -Profile Any
 ```
 
-For Linux:
+For Linux (lost after reboot):
 
 ```shell
-sudo iptables -I OUTPUT -p tcp --dport 1000:1079 -j REJECT
-sudo iptables -I OUTPUT -p tcp --dport 1081:10000 -j REJECT
+sudo iptables -A OUTPUT -p tcp -m multiport --dports 1200,8049,8048,3360,5660,18005 -j DROP
 ```
 
 ## Restoring Firewall Rules
 
-After testing is complete, run the following on the mining rigs:  
-For Windows:
+After testing is complete, run the following on the miner:
+For Windows (persistent):
 
 ```powershell
-Remove-NetFirewallRule -DisplayName "Block-Out-1000-10000"
+Remove-NetFirewallRule -DisplayName "Block TCP Outbound devpool Ports"
 ```
 
-For Linux:
+## Running the Honeypot Server
+
+Download `srbminer-nofee/default_config.json`, rename it to `config.json`, and move it to `srbminer-nofee/SOCKS5 honeypot/data/config.json`
 
 ```shell
-sudo iptables -D OUTPUT -p tcp --dport 1000:1079 -j REJECT
-sudo iptables -D OUTPUT -p tcp --dport 1081:10000 -j REJECT
+cd srbminer-nofee\SOCKS5 honeypot
+npm i
+npm start
 ```
 
 # SRBMiner-nofee
