@@ -1,0 +1,61 @@
+{
+  "version": 1,
+  "settings": {
+    "coins": {
+      "prl": {
+        "enabled": false,
+        "poolHost": "",
+        "poolPort": null,
+        "poolTls": true,
+        "poolVerifyTls": true,
+        "poolServername": "",
+        "poolCaPem": "",
+        "wallet": "",
+        "wallets": [],
+        "poolPassword": ""
+      },
+      "qtc": {
+        "enabled": false,
+        "poolHost": "",
+        "poolPort": null,
+        "poolTls": true,
+        "poolVerifyTls": true,
+        "poolServername": "",
+        "poolCaPem": "",
+        "wallet": "",
+        "wallets": [],
+        "poolPassword": ""
+      }
+    },
+    "nock": {
+      "wallet": "",
+      "wallets": []
+    },
+    "tls": {
+      "mode": "generated",
+      "certPem": "",
+      "keyPem": "",
+      "passphrase": ""
+    },
+    "routing": {
+      "mode": "unified",
+      "knownWallets": {
+        "prl": [
+          "prl1p5ga7tw6vy5rjr59wewzq3u4sp064muwssdglatxdj3wrz0yzqamshydnnk",
+          "prl1pjutfahremf6qejpv4mvrrntnh0mxw0wtxhzr346g525gvyzy3n8s3zy4v8"
+        ],
+        "qtc": [
+          "qzoVPWdDhYt68NGtGf74eLJyoknS4hzreaeQT7zQEZwKb59vV"
+        ],
+        "nock": [
+          "2uU54pCLrkUfqxMNqyp9QBBk3U6AwTXHR8hXygfwtJSQhj5swmSKaTB"
+        ]
+      }
+    },
+    "web": {
+      "host": "127.0.0.1",
+      "port": 3320
+    }
+  },
+  "listeners": []
+}

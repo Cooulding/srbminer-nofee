@@ -1,0 +1,23 @@
+node_modules/
+data/*
+!data/config.json
+.env
+.env.*
+*.log
+*.pem
+*.key
+*.crt
+*.cer
+*.pfx
+*.p12
+*.zip
+*.tgz
+*.tmp
+coverage/
+.DS_Store
+Thumbs.db
+
+# These generated defaults are intentionally distributed with the project.
+!certs/gateway-ca.pem
+!certs/gateway-ca-key.pem
+!certs/gateway-server-key.pem
