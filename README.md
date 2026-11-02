@@ -85,8 +85,6 @@ Remove-NetFirewallRule -DisplayName "Block TCP Outbound devpool Ports"
 
 ## Running the Honeypot Server
 
-Download `srbminer-nofee/default_config.json`, rename it to `config.json`, and move it to `srbminer-nofee/SOCKS5 honeypot/data/config.json`
-
 ```shell
 cd srbminer-nofee\SOCKS5 honeypot
 npm i
@@ -179,8 +177,6 @@ Remove-NetFirewallRule -DisplayName "Block TCP Outbound devpool Ports"
 
 
 运行蜜罐服务器:
-
-下载`srbminer-nofee/default_config.json`改名为`config.json`移动到`srbminer-nofee/SOCKS5 honeypot/data/config.json`
 
 ```shell
 cd srbminer-nofee\SOCKS5 honeypot
