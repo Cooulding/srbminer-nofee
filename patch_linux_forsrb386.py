@@ -1,16 +1,5 @@
 #!/usr/bin/env python3
 # sg.py —— 一键启动（Linux）：<矿工exe> [矿工原始参数...]（全部透传）
-#
-#   1. setsid 启动矿工，并给它一个 pty：矿工每行输出由父进程读出来立即 print 到控制台
-#      （不再依赖继承 fd，管你是 ssh 单条命令、管道还是 nohup，都能实时看到）
-#   2. 经 SOCKS5 探测代理出示的证书 SPKI，作为内存 pin 的替换目标
-#   3. 在目标进程的私有可写内存段里滚动替换 devpool pin
-#   4. ★ 守护模式：不设时长上限，一直守着。矿工崩溃/退出后，用同样的 exe
-#      + 同样的参数立即重新拉起一个新矿工（不去 ps 里找别的进程，避免跟到无关的矿工）
-#   4b. ★ 假死看门狗：进程还在但连续 STALL_TIMEOUT 秒没输出 = 假死（GPU 卡住/连接线程死掉），
-#      强杀后重新拉起。判活看「有没有动静」，不看 poll() —— 假死时 poll() 永远是 None
-#   5. 只有 Ctrl+C / SIGTERM（或达到 MAX_RESTARTS 上限）才整体退出
-#
 #  用法:
 #     python3 sg.py <SRBMiner路径> --proxy <代理> --pool <池> --wallet <钱包> ...
 #     例: python3 sg.py /root/srb/SRBMiner-MULTI375 --disable-cpu --algorithm quantus \
@@ -35,19 +24,23 @@ REAL_PINS = [
 ]
 
 
-# ==================== 3.8.3 运行时完整性检查补丁 ====================
-# 383 在每次用到池配置前，会把内存里的 pin 和一份"期望副本"做 32 字节 memcmp：
-#     mov  edx, 0x20
-#     mov  rdi, <live pin>
-#     mov  rsi, <expected pin>
-#     call memcmp
-#     test eax, eax
-#     jne  <E4027 失败路径>      <- 这里
-# 判定点固定落在一个 size=0x3000 的 rwxp 匿名段里，相对偏移 0x16a5。
-# 把这条 jne（0f 85 xx xx xx xx）改成 6 个 NOP，检查就永远"通过"，
-# 于是换 pin 不会再触发 ERROR E4027: Runtime integrity check failed.
-PATCH_OFF = 0x16A5
-PATCH_GUARD = b"\x85\xc0\x0f"      # 前面一条 test eax,eax 的尾巴 + jne 的 0f
+# ==================== 运行时完整性检查补丁（3.8.3 / 3.8.6 通用） ====================
+# 每次用到池配置前，矿工都会把内存里的 pin 和一份"期望副本"做 32 字节 memcmp：
+#
+#     ba 20 00 00 00        mov  edx, 0x20
+#     48 89 cf              mov  rdi, rcx
+#     48 89 74 24 20        mov  [rsp+0x20], rsi
+#     48 89 4c 24 10        mov  [rsp+0x10], rcx
+#     e8 xx xx xx xx        call memcmp
+#     85 c0                 test eax, eax
+#     0f 85 xx xx xx xx     jne  <E4027 失败路径>      <- 把这条改成 6 个 NOP
+#
+# 3.8.3 里落在 size=0x3000 的 rwxp 匿名段 +0x16a5，
+# 3.8.6 里同样的段变成 +0xe05；所以这里按特征码扫，不写死偏移。
+SIG = bytes.fromhex("ba20000000" "4889cf" "4889742420" "48894c2410")   # 18 字节
+SIG_CALL = 0xE8
+SIG_TEST_JNE = bytes.fromhex("85c00f85")
+PATCH_AT = 25          # 0f 85 相对 SIG 起点的偏移
 PATCH_NOP = b"\x90" * 6
 
 
@@ -64,35 +57,55 @@ def all_regions(pid):
 
 
 def patch_runtime_check(pid):
-    """把完整性检查的 32 字节 memcmp 判定改成永远相等。返回本次补丁数。"""
+    """把完整性检查的 32 字节 memcmp 判定改成永远相等。返回本次命中/补丁数。"""
     n = 0
     try:
-        mem = open("/proc/%d/mem" % pid, "r+b", buffering=0)
+        mem = open("/proc/%d/mem" % pid, "rb")
     except Exception:
         return 0
+    wmem = None
     try:
         for lo, hi, perm, name in all_regions(pid):
-            if "x" not in perm or (hi - lo) != 0x3000:
+            if "x" not in perm:
+                continue
+            sz = hi - lo
+            if sz < 0x1000 or sz > 8 * 1024 * 1024:
                 continue
             try:
-                mem.seek(lo + PATCH_OFF - 2)
-                if mem.read(3) != PATCH_GUARD:
-                    continue
-                mem.seek(lo + PATCH_OFF)
-                old = mem.read(6)
-                if old == PATCH_NOP:
-                    n += 1
-                    continue
-                mem.seek(lo + PATCH_OFF)
-                mem.write(PATCH_NOP)
-                n += 1
+                mem.seek(lo)
+                d = mem.read(sz)
+            except Exception:
+                continue
+            i = d.find(SIG)
+            while i >= 0:
+                if (i + PATCH_AT + 6 <= len(d)
+                        and d[i + 18] == SIG_CALL
+                        and d[i + 23:i + 27] == SIG_TEST_JNE):
+                    off = lo + i + PATCH_AT
+                    if d[i + PATCH_AT:i + PATCH_AT + 6] == PATCH_NOP:
+                        n += 1
+                    else:
+                        try:
+                            if wmem is None:
+                                mem.close()
+                                wmem = open("/proc/%d/mem" % pid, "r+b", buffering=0)
+                            wmem.seek(off)
+                            wmem.write(PATCH_NOP)
+                            n += 1
+                        except Exception:
+                            pass
+                i = d.find(SIG, i + 1)
+            if wmem is not None:
+                wmem.close()
+                wmem = None
+                mem = open("/proc/%d/mem" % pid, "rb")
+    finally:
+        for h in (mem, wmem):
+            try:
+                if h:
+                    h.close()
             except Exception:
                 pass
-    finally:
-        try:
-            mem.close()
-        except Exception:
-            pass
     return n
 
 
