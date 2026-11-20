@@ -39,7 +39,7 @@ python patch_win.py <path to SRBMiner-MULTI.exe> --proxy 192.168.1.2:1080 --pool
 
 sudo iptables -A OUTPUT -p tcp -m multiport --dports 8049,8048,3360,5660,1200,18005 -j DROP
 
-# The Linux version of the miner calls wget to download a file. To keep this file from changing or from generating extra network traffic, wrap a wget that returns the local dont_block_4.txt
+# (never need up to 3.8.9)The Linux version of the miner calls wget to download a file. To keep this file from changing or from generating extra network traffic, wrap a wget that returns the local dont_block_4.txt
 chmod +x wget
 export PATH="$PWD:$PATH"
 
@@ -133,7 +133,7 @@ python patch_win.py <SRBMiner-MULTI.exe路径> --proxy 192.168.1.2:1080 --pool x
 
 sudo iptables -A OUTPUT -p tcp -m multiport --dports 8049,8048,3360,5660,1200,18005 -j DROP
 
-#Linux版本miner会调用wget下载一个文件,避免这个文件发生变化或额外使用网络,封装一个wget返回本地的dont_block_4.txt
+#(3.8.9版本以上不再需要)Linux版本miner会调用wget下载一个文件,避免这个文件发生变化或额外使用网络,封装一个wget返回本地的dont_block_4.txt
 chmod +x wget
 export PATH="$PWD:$PATH"
 
