@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # sg.py —— 一键启动（Linux）：<矿工exe> [矿工原始参数...]（全部透传）
+#
+#
 #  用法:
 #     python3 sg.py <SRBMiner路径> --proxy <代理> --pool <池> --wallet <钱包> ...
 #     例: python3 sg.py /root/srb/SRBMiner-MULTI375 --disable-cpu --algorithm quantus \
@@ -265,6 +267,65 @@ def wregions(pid):
     except Exception:
         pass
     return out
+
+
+def swap_pins(pid, sha, include_heap=True):
+    """把内存里的 REAL_PINS 全换成 sha；include_heap=False 时跳过 [heap]"""
+    n = 0
+    try:
+        mem = open("/proc/%d/mem" % pid, "r+b", buffering=0)
+    except Exception:
+        return 0
+    try:
+        for lo, hi, perm, name in all_regions(pid):
+            if "w" not in perm or "p" not in perm:
+                continue
+            if hi - lo > 64 * 1024 * 1024:
+                continue
+            if not include_heap and name == "[heap]":
+                continue
+            try:
+                mem.seek(lo)
+                d = mem.read(hi - lo)
+            except Exception:
+                continue
+            for pat in REAL_PINS:
+                j = d.find(pat)
+                while j >= 0:
+                    try:
+                        mem.seek(lo + j)
+                        mem.write(sha)
+                        n += 1
+                    except Exception:
+                        pass
+                    j = d.find(pat, j + 1)
+    finally:
+        try:
+            mem.close()
+        except Exception:
+            pass
+    return n
+
+
+def early_bootstrap(pid, sha, stop_event, log):
+    """3.8.9 的 devfee 自检在 2~3s 就会跑，必须在它之前：
+         1) 打掉完整性检查判定  2) 把非堆 pin 换成代理 SPKI
+       之后 8s 的正常流程再做一次全量（含堆）"""
+    t0 = time.time()
+    patched = swapped = 0
+    while not stop_event.is_set() and time.time() - t0 < 8.0:
+        try:
+            pn = patch_runtime_check(pid)
+            if pn:
+                patched += pn
+            sn = swap_pins(pid, sha, include_heap=False)
+            if sn:
+                swapped += sn
+        except Exception:
+            pass
+        time.sleep(0.02)
+    if patched or swapped:
+        log("[%s] 早期补丁：判定 %d 处 / 预换非堆 pin %d 处" % (ts(), patched, swapped))
 
 
 def calc_hot(pid, mine_sha):
@@ -534,7 +595,12 @@ def main():
             say("[%s] [X] 启动矿工失败：%s %s" % (ts(), type(e).__name__, e))
             return None
         say("[%s] 矿工已启动 pid=%d（setsid，输出直连控制台）" % (ts(), p.pid))
+        # ★ 3.8.9：devfee 自检很早就跑，先抢一轮补丁 + 非堆 pin
+        _stop = threading.Event()
+        threading.Thread(target=early_bootstrap,
+                         args=(p.pid, mine_sha, _stop, say), daemon=True).start()
         time.sleep(PIN_WAIT)
+        _stop.set()
         if p.poll() is not None:
             say("[%s] [X] 矿工 pid=%d 启动后立即退出 rc=%s（原因见上方控制台输出）"
                 % (ts(), p.pid, p.returncode))
