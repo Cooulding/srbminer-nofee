@@ -214,6 +214,89 @@ function waitHandshake(socket, event, label) {
   });
 }
 
+// Vendor self-check (devfee): SRBMiner 3.8.9+ fetches
+//   https://srbminer.com/01082026_4/dont_block_4.txt
+// in-process (no wget) through its own SOCKS5 client. Answer it from the bundled
+// copy in data/dont_block_4.txt so a cloud-side change cannot break the miner.
+const MIRROR_PORTS = new Set([80, 443]);
+const MIRROR_FILE = path.join(__dirname, 'data', 'dont_block_4.txt');
+let mirrorBody = null;
+
+async function mirrorBodyBuffer() {
+  if (mirrorBody) return mirrorBody;
+  try { mirrorBody = await fs.readFile(MIRROR_FILE); }
+  catch { mirrorBody = Buffer.from('ok\n'); }
+  return mirrorBody;
+}
+
+function mirrorRequest(buffer) {
+  const head = buffer.toString('latin1', 0, Math.min(buffer.length, 16384));
+  const line = head.split('\r\n', 1)[0];
+  const match = /^([A-Z]{3,10}) (\S+) HTTP\/(1\.[01])$/.exec(line);
+  return match ? { method: match[1], target: match[2], version: match[3] } : null;
+}
+
+// 读第一段数据但不动用它；不是 HTTP 就 unshift 回去
+function peekChunk(socket, timeout) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => done(new Error('peek timeout')), timeout);
+    const cleanup = () => {
+      clearTimeout(timer);
+      socket.off('readable', onReadable);
+      socket.off('error', onError);
+      socket.off('end', onGone);
+      socket.off('close', onGone);
+    };
+    const done = (error, chunk) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (error) reject(error); else resolve(chunk);
+    };
+    const onReadable = () => { const chunk = socket.read(); if (chunk) done(null, chunk); };
+    const onError = error => done(error);
+    const onGone = () => done(new Error('closed'));
+    socket.on('readable', onReadable);
+    socket.once('error', onError);
+    socket.once('end', onGone);
+    socket.once('close', onGone);
+    const buffered = socket.read();
+    if (buffered) done(null, buffered);
+  });
+}
+
+// 命中就本地应答并返回 { method, target }，否则返回 null（数据已还原）
+async function serveMirror(downstream, request) {
+  if (!MIRROR_PORTS.has(Number(request.port))) return null;
+  let chunk;
+  try { chunk = await peekChunk(downstream, 3000); }
+  catch { return null; }
+  const parsed = chunk && mirrorRequest(chunk);
+  if (!parsed) {
+    if (chunk && !downstream.destroyed) downstream.unshift(chunk);
+    return null;
+  }
+  const body = await mirrorBodyBuffer();
+  const head = [
+    `HTTP/${parsed.version} 200 OK`,
+    'Server: SRBMiner-Mirror-Cache',
+    'Content-Type: application/octet-stream',
+    `Content-Length: ${body.length}`,
+    'Accept-Ranges: none',
+    'Connection: close',
+    '', ''
+  ].join('\r\n');
+  const payload = parsed.method === 'HEAD'
+    ? Buffer.from(head, 'latin1')
+    : Buffer.concat([Buffer.from(head, 'latin1'), body]);
+  if (!downstream.destroyed) {
+    downstream.write(payload);
+    downstream.end();
+  }
+  return parsed;
+}
+
 function detectTransport(socket) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -1089,6 +1172,17 @@ class Gateway {
         downstream = await this.certificates.accept(client, certHost, this.getSettings().tls, track);
       }
       if (pair.finished || downstream.destroyed) return pair.finish(null, 'miner 已断开');
+      // 厂商自检请求（HTTPS/HTTP 80/443）：用本地副本应答，不走上游矿池逻辑
+      if (!stratum) {
+        const mirror = await serveMirror(downstream, request);
+        if (mirror) {
+          info.state = 'mirror-served';
+          this.store.event('info', `厂商自检请求已本地应答：${mirror.method} ${mirror.target}`, {
+            sessionId: info.id, listenerId: this.rule.id, originalHost: request.host, originalPort: request.port
+          });
+          return pair.finish(null, '厂商自检请求已本地应答');
+        }
+      }
       info.state = 'awaiting-login';
       const bridge = new PassThrough();
       const requests = new Map();
